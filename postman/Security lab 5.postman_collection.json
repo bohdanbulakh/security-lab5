@@ -1,0 +1,464 @@
+{
+  "info": {
+    "_postman_id": "c7b4472f-4d3f-467f-9adf-ddad71f394f8",
+    "name": "Security lab 5",
+    "description": "Запити до застосунку лаб. 5: лаб. 4 + перевірка підпису JWT від Auth0 і зашифрований токен сесії (JWE).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Register",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/register",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "register"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\",\n  \"name\": \"{{name}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('User created', () => pm.response.to.have.status(201));",
+              "pm.environment.set('user_id', pm.response.json().user_id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/login",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "login"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"login\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Logged in', () => pm.response.to.have.status(200));",
+              "const token = pm.response.json().token;",
+              "pm.test('Session token is JWE (5 parts)', () => pm.expect(token.split('.')).to.have.length(5));",
+              "pm.environment.set('session_token', token);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Login (wrong password)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/login",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "login"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"login\": \"{{email}}\",\n  \"password\": \"wrong-password\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Rejected by Auth0', () => pm.response.to.have.status(401));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get me",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "{{session_token}}",
+            "description": "id сесії застосунку, без префікса Bearer"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/me",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "me"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Authorized', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('Access token signature is valid', () => pm.expect(body.verification.accessToken.valid).to.be.true);",
+              "const t = body.token;",
+              "const prev = pm.environment.get('access_token');",
+              "if (prev && prev !== t.accessToken) console.log('Access token was refreshed by server');",
+              "pm.environment.set('access_token', t.accessToken);",
+              "console.log(`expiresIn=${t.expiresIn}s, refreshCount=${t.refreshCount}`);",
+              "console.log('Decrypted session token:', JSON.stringify(body.sessionToken.payload));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Verify access token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/verify",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "verify"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{access_token}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Signature is valid', () => {",
+              "    pm.response.to.have.status(200);",
+              "    pm.expect(pm.response.json().valid).to.be.true;",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Verify tampered token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/verify",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "verify"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{tampered_token}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const fromB64Url = (s) => Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');",
+              "const toB64Url = (s) => Buffer.from(s, 'utf8').toString('base64').replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');",
+              "// Міняємо sub у payload, підпис лишається від оригінального токена",
+              "const [header, payload, signature] = pm.environment.get('access_token').split('.');",
+              "const claims = JSON.parse(fromB64Url(payload));",
+              "claims.sub = 'auth0|hacker';",
+              "pm.variables.set('tampered_token', `${header}.${toB64Url(JSON.stringify(claims))}.${signature}`);"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Rejected: invalid signature', () => {",
+              "    pm.response.to.have.status(401);",
+              "    pm.expect(pm.response.json().code).to.eql('invalid_signature');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Verify token with alg none",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/verify",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "verify"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{none_token}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const fromB64Url = (s) => Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');",
+              "const toB64Url = (s) => Buffer.from(s, 'utf8').toString('base64').replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');",
+              "// Непідписаний токен: alg=none і порожній підпис",
+              "const payload = pm.environment.get('access_token').split('.')[1];",
+              "pm.variables.set('none_token', `${toB64Url(JSON.stringify({ alg: 'none', typ: 'JWT' }))}.${payload}.`);"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Rejected: algorithm not allowed', () => {",
+              "    pm.response.to.have.status(401);",
+              "    pm.expect(pm.response.json().code).to.eql('invalid_algorithm');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get me (tampered session token)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "{{tampered_session_token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/me",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "me"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Міняємо один символ у зашифрованому payload (4 частина JWE)",
+              "const parts = pm.environment.get('session_token').split('.');",
+              "parts[3] = (parts[3][0] === 'A' ? 'B' : 'A') + parts[3].slice(1);",
+              "pm.variables.set('tampered_session_token', parts.join('.'));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Rejected: cannot decrypt', () => {",
+              "    pm.response.to.have.status(401);",
+              "    pm.expect(pm.response.json().error).to.include('Cannot decrypt');",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Refresh token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "{{session_token}}",
+            "description": "id сесії застосунку, без префікса Bearer"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/refresh",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "refresh"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Token refreshed', () => pm.response.to.have.status(200));",
+              "const t = pm.response.json().token;",
+              "pm.test('Access token changed', () => pm.expect(t.accessToken).to.not.eql(pm.environment.get('access_token')));",
+              "pm.environment.set('access_token', t.accessToken);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Logout",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "{{session_token}}",
+            "description": "id сесії застосунку, без префікса Bearer"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/logout",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "logout"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Logged out', () => pm.response.to.have.status(204));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
