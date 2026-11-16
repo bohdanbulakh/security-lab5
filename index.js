@@ -3,6 +3,7 @@ const onFinished = require('on-finished');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { JwtError, Auth0KeyStore, verifyJwt } = require('./jwt');
 
 try {
     process.loadEnvFile(path.join(__dirname, '.env'));
@@ -22,7 +23,8 @@ const PORT = Number(process.env.PORT) || 3000;
 // За скільки секунд до завершення життя access token його треба оновити
 const REFRESH_THRESHOLD = Number(process.env.REFRESH_THRESHOLD_SECONDS) || 60;
 
-for (const [name, value] of Object.entries({ AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET })) {
+// AUTH0_AUDIENCE обов'язковий: без нього Auth0 видає непрозорий access token, а не JWT
+for (const [name, value] of Object.entries({ AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE })) {
     if (!value) {
         console.error(`Missing ${name} in .env`);
         process.exit(1);
@@ -30,6 +32,7 @@ for (const [name, value] of Object.entries({ AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH
 }
 
 const AUTH0_URL = `https://${AUTH0_DOMAIN}`;
+const AUTH0_ISSUER = `${AUTH0_URL}/`;
 const SESSION_KEY = 'Authorization';
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 
@@ -145,8 +148,8 @@ function passwordGrant(username, password) {
         client_id: AUTH0_CLIENT_ID,
         client_secret: AUTH0_CLIENT_SECRET,
         scope: 'openid profile email offline_access',
+        audience: AUTH0_AUDIENCE,
     };
-    if (AUTH0_AUDIENCE) form.audience = AUTH0_AUDIENCE;
 
     return auth0Request('/oauth/token', { form });
 }
@@ -202,33 +205,52 @@ function nowSeconds() {
     return Math.floor(Date.now() / 1000);
 }
 
-// Лише декодування payload; перевірка підпису - тема лаб. 5
-function decodeJwtPayload(token) {
-    try {
-        const payload = token.split('.')[1];
-        return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    } catch (e) {
-        return null;
-    }
+// ---------------------------------------------------------------- jwt verification (лаб. 5)
+
+const keyStore = new Auth0KeyStore(AUTH0_URL);
+
+function verifyAccessToken(token) {
+    return verifyJwt(token, keyStore, { issuer: AUTH0_ISSUER, audience: AUTH0_AUDIENCE });
 }
 
-function storeTokens(session, tokens) {
+function verifyIdToken(token) {
+    return verifyJwt(token, keyStore, { issuer: AUTH0_ISSUER, audience: AUTH0_CLIENT_ID });
+}
+
+// Токени від Auth0 потрапляють у сесію лише після перевірки підпису
+async function verifyTokens(tokens) {
+    const access = await verifyAccessToken(tokens.access_token);
+    const id = tokens.id_token ? await verifyIdToken(tokens.id_token) : null;
+    return { access, id };
+}
+
+function storeTokens(session, tokens, verified) {
     session.accessToken = tokens.access_token;
     session.expiresAt = nowSeconds() + tokens.expires_in;
     // Якщо rotation вимкнений, Auth0 не повертає новий refresh token - лишаємо старий
     if (tokens.refresh_token) session.refreshToken = tokens.refresh_token;
-    if (tokens.id_token) {
+    if (verified.id) {
+        const claims = verified.id.payload;
         session.idToken = tokens.id_token;
-        const claims = decodeJwtPayload(tokens.id_token);
-        if (claims) {
-            session.user = {
-                sub: claims.sub,
-                email: claims.email,
-                name: claims.name,
-                nickname: claims.nickname,
-            };
-        }
+        session.user = {
+            sub: claims.sub,
+            email: claims.email,
+            name: claims.name,
+            nickname: claims.nickname,
+        };
     }
+}
+
+function describeJwt({ header, payload }) {
+    return {
+        valid: true,
+        alg: header.alg,
+        kid: header.kid,
+        iss: payload.iss,
+        aud: payload.aud,
+        sub: payload.sub,
+        exp: payload.exp,
+    };
 }
 
 function tokenInfo(session) {
@@ -245,7 +267,7 @@ function tokenInfo(session) {
 
 async function refreshSession(session) {
     const tokens = await refreshTokenGrant(session.refreshToken);
-    storeTokens(session, tokens);
+    storeTokens(session, tokens, await verifyTokens(tokens));
     session.refreshCount = (session.refreshCount || 0) + 1;
     session.lastRefreshAt = nowSeconds();
     console.log(`[refresh] ${session.login}: new token valid for ${tokens.expires_in}s`);
@@ -264,23 +286,35 @@ async function requireAuth(req, res, next) {
     }
 
     const expiresIn = session.expiresAt - nowSeconds();
-    if (expiresIn > REFRESH_THRESHOLD) {
-        return next();
+    if (expiresIn <= REFRESH_THRESHOLD) {
+        if (!session.refreshToken) {
+            if (expiresIn <= 0) {
+                destroySession(req);
+                return res.status(401).json({ error: 'Token expired and no refresh token available' });
+            }
+        } else {
+            try {
+                await refreshSession(session);
+            } catch (e) {
+                console.error('[refresh] failed:', e.message);
+                destroySession(req);
+                return res.status(401).json({ error: `Refresh failed: ${e.message}` });
+            }
+        }
     }
 
-    if (!session.refreshToken) {
-        if (expiresIn > 0) return next();
-        destroySession(req);
-        return res.status(401).json({ error: 'Token expired and no refresh token available' });
-    }
-
+    // Перевірка підпису access token перед кожним захищеним запитом
     try {
-        await refreshSession(session);
+        req.accessToken = await verifyAccessToken(session.accessToken);
         next();
     } catch (e) {
-        console.error('[refresh] failed:', e.message);
+        if (!(e instanceof JwtError)) {
+            console.error('[jwt] cannot verify token:', e.message);
+            return res.status(502).json({ error: e.message });
+        }
+        console.error(`[jwt] ${session.login}: ${e.code}: ${e.message}`);
         destroySession(req);
-        res.status(401).json({ error: `Refresh failed: ${e.message}` });
+        res.status(401).json({ error: `Invalid access token: ${e.message}` });
     }
 }
 
@@ -298,14 +332,17 @@ app.post('/api/login', async (req, res) => {
 
     try {
         const tokens = await passwordGrant(login, password);
-        storeTokens(req.session, tokens);
+        const verified = await verifyTokens(tokens);
+        console.log(`[login] ${login}: token signature is valid (${verified.access.header.alg}, kid ${verified.access.header.kid})`);
+        storeTokens(req.session, tokens, verified);
         req.session.login = login;
         req.session.refreshCount = 0;
 
         res.json({ token: req.sessionId });
     } catch (e) {
         console.error('[login] failed:', e.message);
-        res.status(e.status === 403 || e.status === 401 ? 401 : 502).json({ error: e.message });
+        const status = e instanceof JwtError || e.status === 403 || e.status === 401 ? 401 : 502;
+        res.status(status).json({ error: e.message });
     }
 });
 
@@ -331,7 +368,29 @@ app.get('/api/me', requireAuth, (req, res) => {
         username: user.name || user.email || login,
         user,
         token: tokenInfo(req.session),
+        verification: {
+            accessToken: describeJwt(req.accessToken),
+            publicKey: keyStore.info(),
+        },
     });
+});
+
+// Перевірка довільного токена: підпис + iss/aud/exp (для демонстрації підробленого токена)
+app.post('/api/verify', async (req, res) => {
+    const { token, type = 'access' } = req.body;
+    if (!token) {
+        return res.status(400).json({ error: 'Token is required' });
+    }
+
+    try {
+        const verified = type === 'id' ? await verifyIdToken(token) : await verifyAccessToken(token);
+        res.json({ ...describeJwt(verified), payload: verified.payload });
+    } catch (e) {
+        if (!(e instanceof JwtError)) {
+            return res.status(502).json({ error: e.message });
+        }
+        res.status(401).json({ valid: false, code: e.code, error: e.message });
+    }
 });
 
 // Примусове оновлення токена (для демонстрації refresh-token grant)
@@ -352,6 +411,10 @@ app.post('/api/logout', (req, res) => {
     res.status(204).end();
 });
 
-app.listen(PORT, () => {
-    console.log(`App listening on http://localhost:${PORT} (Auth0 domain: ${AUTH0_DOMAIN})`);
-});
+keyStore.load()
+    .catch((e) => console.error('[jwt]', e.message))
+    .finally(() => {
+        app.listen(PORT, () => {
+            console.log(`App listening on http://localhost:${PORT} (Auth0 domain: ${AUTH0_DOMAIN})`);
+        });
+    });

@@ -95,6 +95,20 @@
         }
 
         .actions { display: flex; gap: 8px; margin-top: 12px; }
+
+        h2 { font-size: 16px; margin: 20px 0 8px; }
+
+        pre {
+            margin: 8px 0 0;
+            padding: 6px;
+            max-height: 200px;
+            overflow: auto;
+            font-size: 11px;
+            background: #f1f1f1;
+            border-radius: 3px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
     </style>
 </head>
 
@@ -134,6 +148,8 @@
             <dt>Оновлення за</dt><dd id="threshold"></dd>
             <dt>Refresh token</dt><dd id="has-refresh"></dd>
             <dt>Оновлень</dt><dd id="refresh-count"></dd>
+            <dt>Підпис access_token</dt><dd id="signature"></dd>
+            <dt>Публічний ключ</dt><dd id="public-key"></dd>
         </dl>
         <label for="access-token"><b>access_token</b></label>
         <textarea id="access-token" readonly></textarea>
@@ -142,6 +158,18 @@
             <button type="button" id="logout-btn" class="btn">Logout</button>
         </div>
         <p id="profile-msg" class="msg"></p>
+
+        <h2>Перевірка JWT</h2>
+        <form id="verify-form">
+            <textarea name="token" placeholder="JWT" required></textarea>
+            <select name="type" class="field">
+                <option value="access">access_token (aud = API)</option>
+                <option value="id">id_token (aud = client_id)</option>
+            </select>
+            <button type="submit" class="btn secondary">Verify</button>
+        </form>
+        <p id="verify-msg" class="msg"></p>
+        <pre id="verify-result" class="hidden"></pre>
     </section>
 </main>
 
@@ -274,6 +302,9 @@
             $('user-sub').textContent = me.user.sub || '-';
             $('user-email').textContent = me.user.email || '-';
             tokenState = me.token;
+            const sig = me.verification.accessToken;
+            $('signature').textContent = `валідний (${sig.alg}, kid ${sig.kid})`;
+            $('public-key').textContent = `${me.verification.publicKey.subject}, SHA-256 ${me.verification.publicKey.fingerprint}`;
 
             $('guest').classList.add('hidden');
             $('profile').classList.remove('hidden');
@@ -294,6 +325,24 @@
         } catch (err) {
             showMsg($('profile-msg'), err.message, 'error');
         }
+    });
+
+    $('verify-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const response = await fetch('/api/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: form.token.value.trim(), type: form.type.value }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (body.valid) {
+            showMsg($('verify-msg'), `Підпис валідний (${body.alg}, kid ${body.kid})`, 'ok');
+        } else {
+            showMsg($('verify-msg'), `${body.code || response.status}: ${body.error}`, 'error');
+        }
+        $('verify-result').textContent = JSON.stringify(body.payload || body, null, 2);
+        $('verify-result').classList.remove('hidden');
     });
 
     $('logout-btn').addEventListener('click', async () => {
