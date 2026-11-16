@@ -422,6 +422,7 @@ app.post('/api/verify', async (req, res) => {
         if (!(e instanceof JwtError)) {
             return res.status(502).json({ error: e.message });
         }
+        console.error(`[verify] ${e.code}: ${e.message}`);
         res.status(401).json({ valid: false, code: e.code, error: e.message });
     }
 });
