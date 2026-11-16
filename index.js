@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { JwtError, Auth0KeyStore, verifyJwt } = require('./jwt');
+const { loadOrCreateKeyPair, encryptJwt, decryptJwt } = require('./jwe');
 
 try {
     process.loadEnvFile(path.join(__dirname, '.env'));
@@ -22,6 +23,8 @@ const {
 const PORT = Number(process.env.PORT) || 3000;
 // За скільки секунд до завершення життя access token його треба оновити
 const REFRESH_THRESHOLD = Number(process.env.REFRESH_THRESHOLD_SECONDS) || 60;
+// Час життя токена сесії, який отримує клієнт
+const SESSION_TOKEN_TTL = Number(process.env.SESSION_TOKEN_TTL_SECONDS) || 86400;
 
 // AUTH0_AUDIENCE обов'язковий: без нього Auth0 видає непрозорий access token, а не JWT
 for (const [name, value] of Object.entries({ AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_AUDIENCE })) {
@@ -35,6 +38,8 @@ const AUTH0_URL = `https://${AUTH0_DOMAIN}`;
 const AUTH0_ISSUER = `${AUTH0_URL}/`;
 const SESSION_KEY = 'Authorization';
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
+// Ключі для шифрування токена сесії (додаткове завдання)
+const sessionKeys = loadOrCreateKeyPair(path.join(__dirname, 'keys'));
 
 const app = express();
 app.use(express.json());
@@ -78,8 +83,30 @@ class Session {
 
 const sessions = new Session();
 
+// Клієнт отримує не id сесії, а JWT із зашифрованим payload (JWE). id сесії лежить всередині.
+function issueSessionToken(sessionId, user = {}) {
+    const now = nowSeconds();
+    return encryptJwt({
+        sid: sessionId,
+        sub: user.sub,
+        email: user.email,
+        iat: now,
+        exp: now + SESSION_TOKEN_TTL,
+    }, sessionKeys.publicKey);
+}
+
 app.use((req, res, next) => {
-    let sessionId = req.get(SESSION_KEY);
+    let sessionId = null;
+    const token = req.get(SESSION_KEY);
+    if (token) {
+        try {
+            req.sessionToken = decryptJwt(token, sessionKeys.privateKey);
+            sessionId = req.sessionToken.payload.sid;
+        } catch (e) {
+            req.sessionTokenError = `Invalid session token: ${e.message}`;
+            console.error(`[jwe] ${e.code}: ${e.message}`);
+        }
+    }
     let currentSession = sessionId && sessions.get(sessionId);
 
     if (!currentSession) {
@@ -282,7 +309,11 @@ function destroySession(req) {
 async function requireAuth(req, res, next) {
     const session = req.session;
     if (!session.accessToken) {
-        return res.status(401).json({ error: 'Not authenticated' });
+        return res.status(401).json({ error: req.sessionTokenError || 'Not authenticated' });
+    }
+    // Токен сесії має належати тому ж користувачу, що й токени Auth0 в сесії
+    if (session.user && req.sessionToken.payload.sub !== session.user.sub) {
+        return res.status(401).json({ error: 'Session token does not match session user' });
     }
 
     const expiresIn = session.expiresAt - nowSeconds();
@@ -338,7 +369,7 @@ app.post('/api/login', async (req, res) => {
         req.session.login = login;
         req.session.refreshCount = 0;
 
-        res.json({ token: req.sessionId });
+        res.json({ token: issueSessionToken(req.sessionId, req.session.user) });
     } catch (e) {
         console.error('[login] failed:', e.message);
         const status = e instanceof JwtError || e.status === 403 || e.status === 401 ? 401 : 502;
@@ -372,6 +403,8 @@ app.get('/api/me', requireAuth, (req, res) => {
             accessToken: describeJwt(req.accessToken),
             publicKey: keyStore.info(),
         },
+        // Розшифрований вміст токена сесії - клієнт сам його прочитати не може
+        sessionToken: req.sessionToken,
     });
 });
 

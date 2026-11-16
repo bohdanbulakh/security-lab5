@@ -153,6 +153,11 @@
         </dl>
         <label for="access-token"><b>access_token</b></label>
         <textarea id="access-token" readonly></textarea>
+
+        <label for="session-token"><b>Токен сесії (JWE, payload зашифрований)</b></label>
+        <textarea id="session-token" readonly></textarea>
+        <b>Розшифровано на сервері</b>
+        <pre id="session-payload"></pre>
         <div class="actions">
             <button type="button" id="refresh-btn" class="btn secondary">Refresh now</button>
             <button type="button" id="logout-btn" class="btn">Logout</button>
@@ -304,6 +309,8 @@
             tokenState = me.token;
             const sig = me.verification.accessToken;
             $('signature').textContent = `валідний (${sig.alg}, kid ${sig.kid})`;
+            $('session-token').value = getToken();
+            $('session-payload').textContent = JSON.stringify(me.sessionToken, null, 2);
             $('public-key').textContent = `${me.verification.publicKey.subject}, SHA-256 ${me.verification.publicKey.fingerprint}`;
 
             $('guest').classList.add('hidden');
